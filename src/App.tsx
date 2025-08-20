@@ -1,19 +1,35 @@
-import React from 'react';
-import { Refine, AuthBindings } from '@refinedev/core';
+import { Refine, Authenticated, AuthBindings } from '@refinedev/core';
 import {
   ThemedLayoutV2,
   RefineThemes,
-  notificationProvider,
+  useNotificationProvider,
   ErrorComponent,
 } from '@refinedev/antd';
-import { Client, fetchExchange } from '@urql/core';
-import createDataProvider from '@refinedev/graphql';
-import routerProvider from '@refinedev/react-router-v6';
+import routerProvider, {
+  NavigateToResource,
+  CatchAllNavigate,
+  UnsavedChangesNotifier,
+  DocumentTitleHandler,
+} from '@refinedev/react-router-v6';
 import { BrowserRouter, Routes, Route, Outlet } from 'react-router-dom';
 import { ConfigProvider, App as AntdApp } from 'antd';
 import '@refinedev/antd/dist/reset.css';
 
-// Import your dashboard components
+import { Client, fetchExchange } from '@urql/core';
+import createDataProvider from '@refinedev/graphql';
+
+// Import Ant Design Icons for resources
+import {
+  DashboardOutlined,
+  CarOutlined,
+  TeamOutlined,
+  EnvironmentOutlined,
+  CarFilled,
+  CreditCardOutlined,
+  FileTextOutlined,
+} from '@ant-design/icons';
+
+// Import pages
 import { DashboardPage } from './pages/dashboard';
 import { TripList, TripShow, TripEdit } from './pages/trips';
 import {
@@ -27,148 +43,233 @@ import { SubscriptionList, SubscriptionShow } from './pages/subscriptions';
 import { PaymentList, PaymentShow } from './pages/payments';
 import { VehicleList, VehicleShow, VehicleEdit } from './pages/vehicles';
 
-// GraphQL client configuration using @urql/core
-const API_URL = 'http://localhost:8000/graphql';
+// Import auth components
+import { AdminLogin } from './pages/auth/AdminLogin';
+import { AdminForgotPassword } from './pages/auth/AdminForgotPassword';
+import { AdminResetPassword } from './pages/auth/AdminResetPassword';
 
-const gqlClient = new Client({
+// GraphQL client configuration
+export const API_URL = 'http://localhost:8000/graphql';
+
+// const gqlClient = new Client({
+//   url: API_URL,
+//   exchanges: [fetchExchange],
+//   fetchOptions: () => {
+//     const token = localStorage.getItem('token');
+//     return {
+//       headers: {
+//         Authorization: token ? `Bearer ${token}` : '',
+//         'Content-Type': 'application/json',
+//       },
+//     };
+//   },
+// });
+
+export const client = new Client({
   url: API_URL,
   exchanges: [fetchExchange],
   fetchOptions: () => {
-    const token = localStorage.getItem('token');
     return {
       headers: {
-        Authorization: token ? `Bearer ${token}` : '',
+        /**
+         * For demo purposes, we're using `localStorage` to access the token.
+         * You can use your own authentication logic here.
+         * In real world applications, you'll need to handle it in sync with your `authProvider`.
+         */
+        Authorization: `Bearer ${localStorage.getItem('token')}`,
       },
     };
   },
 });
 
-// Create data provider
-const customDataProvider = createDataProvider(gqlClient);
+const dataProvider = createDataProvider(client);
 
-// Updated Authentication provider with proper types
+
+// Create data provider
+
+// Authentication provider
 const authProvider: AuthBindings = {
   login: async ({ email, password }: { email: string; password: string }) => {
     try {
       const mutation = `
-        mutation Login($email: String!, $password: String!) {
-          login(email: $email, password: $password) {
+        mutation AdminLogin($input: AdminLoginInput!) {
+          adminLogin(input: $input) {
             token
-            entity {
+            admin {
               id
-              email
-              accountType
               firstname
               lastname
+              email
               role
+              department
+              permissions
             }
+            expiresAt
           }
         }
       `;
 
-      const response = await gqlClient
-        .mutation(mutation, { email, password })
+      const result = await client
+        .mutation(mutation, {
+          input: { email, password },
+        })
         .toPromise();
 
-      if (response.error) {
+      if (result.error || !result.data?.adminLogin) {
         return {
           success: false,
           error: {
-            message: 'Login failed',
-            name: 'Invalid credentials',
+            name: 'Login Error',
+            message:
+              result.error?.graphQLErrors?.[0]?.message ||
+              'Invalid credentials',
           },
         };
       }
 
-      const { token, entity } = response.data.login;
+      const { token, admin, expiresAt } = result.data.adminLogin;
 
-      if (token) {
-        localStorage.setItem('token', token);
-        localStorage.setItem('user', JSON.stringify(entity));
-
-        return {
-          success: true,
-          redirectTo: '/',
-        };
-      }
+      // Store authentication data
+      localStorage.setItem('token', token);
+      localStorage.setItem('admin', JSON.stringify(admin));
+      localStorage.setItem('expiresAt', expiresAt);
 
       return {
-        success: false,
-        error: {
-          message: 'Login failed',
-          name: 'Invalid credentials',
-        },
+        success: true,
+        redirectTo: '/dashboard',
       };
     } catch (error: any) {
       return {
         success: false,
         error: {
-          message: error.message || 'Login failed',
-          name: 'Authentication Error',
+          name: 'Login Error',
+          message: error.message || 'An error occurred during login',
         },
       };
     }
   },
 
   logout: async () => {
+    const token = localStorage.getItem('token');
+
+    if (token) {
+      try {
+        const mutation = `
+          mutation AdminLogout {
+            adminLogout {
+              success
+              message
+            }
+          }
+        `;
+        await client.mutation(mutation).toPromise();
+      } catch (error) {
+        console.error('Logout error:', error);
+      }
+    }
+
+    // Clear local storage
     localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    localStorage.removeItem('admin');
+    localStorage.removeItem('expiresAt');
+
     return {
       success: true,
-      redirectTo: '/login',
+      redirectTo: '/auth/login',
     };
   },
 
   check: async () => {
     const token = localStorage.getItem('token');
-    const user = localStorage.getItem('user');
+    const expiresAt = localStorage.getItem('expiresAt');
 
-    if (token && user) {
+    if (!token) {
       return {
-        authenticated: true,
-      };
-    }
-
-    return {
-      authenticated: false,
-      logout: true,
-      redirectTo: '/login',
-      error: {
-        message: 'Authentication required',
-        name: 'Unauthorized',
-      },
-    };
-  },
-
-  onError: async (error: any) => {
-    if (error?.status === 401 || error?.status === 403) {
-      return {
+        authenticated: false,
+        redirectTo: '/auth/login',
         logout: true,
-        redirectTo: '/login',
-        error,
       };
     }
 
+    // Check if token is expired
+    if (expiresAt) {
+      const now = new Date();
+      const expiry = new Date(expiresAt);
+
+      if (now >= expiry) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('admin');
+        localStorage.removeItem('expiresAt');
+
+        return {
+          authenticated: false,
+          error: {
+            message: 'Session expired',
+            name: 'Session Error',
+          },
+          logout: true,
+          redirectTo: '/auth/login',
+        };
+      }
+    }
+
     return {
-      error,
+      authenticated: true,
     };
   },
 
   getPermissions: async () => {
-    const user = localStorage.getItem('user');
-    if (user) {
-      const parsedUser = JSON.parse(user);
-      return parsedUser.accountType || parsedUser.role;
+    const admin = localStorage.getItem('admin');
+    if (!admin) return null;
+
+    try {
+      const adminData = JSON.parse(admin);
+      return {
+        role: adminData.role,
+        permissions: adminData.permissions || [],
+        department: adminData.department,
+      };
+    } catch (error) {
+      return null;
     }
-    return null;
   },
 
   getIdentity: async () => {
-    const user = localStorage.getItem('user');
-    if (user) {
-      return JSON.parse(user);
+    const admin = localStorage.getItem('admin');
+    if (!admin) return null;
+
+    try {
+      const adminData = JSON.parse(admin);
+      return {
+        id: adminData.id,
+        name: `${adminData.firstname} ${adminData.lastname}`,
+        avatar: adminData.profilePhoto || undefined,
+        email: adminData.email,
+        role: adminData.role,
+        department: adminData.department,
+      };
+    } catch (error) {
+      return null;
     }
-    return null;
+  },
+
+  onError: async (error: any) => {
+    if (error?.networkError?.statusCode === 401) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('admin');
+      localStorage.removeItem('expiresAt');
+
+      return {
+        logout: true,
+        redirectTo: '/auth/login',
+        error: {
+          message: 'Session expired. Please login again.',
+          name: 'Authentication Error',
+        },
+      };
+    }
+
+    return { error };
   },
 };
 
@@ -178,141 +279,189 @@ function App() {
     <BrowserRouter>
       <ConfigProvider theme={RefineThemes.Blue}>
         <AntdApp>
-          <Refine
-            dataProvider={customDataProvider}
-            authProvider={authProvider}
-            routerProvider={routerProvider}
-            notificationProvider={notificationProvider}
-            options={{
-              syncWithLocation: true,
-              warnWhenUnsavedChanges: true,
-              projectId: 'riding-app-admin',
-            }}
-            resources={[
-              {
-                name: 'dashboard',
-                list: '/',
-                meta: {
-                  label: 'Dashboard',
-                  icon: <span>🏠</span>,
+          {/* Wrap with urql Provider */}
+          <Provider value={gqlClient}>
+            <Refine
+              dataProvider={dataProvider}
+              authProvider={authProvider}
+              routerProvider={routerProvider}
+              notificationProvider={useNotificationProvider}
+              options={{
+                syncWithLocation: true,
+                warnWhenUnsavedChanges: true,
+                projectId: 'admin-dashboard',
+              }}
+              resources={[
+                {
+                  name: 'dashboard',
+                  list: '/dashboard',
+                  meta: {
+                    label: 'Dashboard',
+                    icon: <DashboardOutlined />,
+                  },
                 },
-              },
-              {
-                name: 'Trips', // Updated to match backend naming
-                list: '/trips',
-                show: '/trips/show/:id',
-                edit: '/trips/edit/:id',
-                meta: {
-                  label: 'Trip Management',
-                  icon: <span>🚗</span>,
+                {
+                  name: 'drivers',
+                  list: '/drivers',
+                  show: '/drivers/show/:id',
+                  edit: '/drivers/edit/:id',
+                  create: '/drivers/create',
+                  meta: {
+                    label: 'Drivers',
+                    icon: <CarOutlined />,
+                  },
                 },
-              },
-              {
-                name: 'Drivers', // Updated to match backend naming
-                list: '/drivers',
-                show: '/drivers/show/:id',
-                edit: '/drivers/edit/:id',
-                create: '/drivers/create',
-                meta: {
-                  label: 'Driver Management',
-                  icon: <span>👤</span>,
+                {
+                  name: 'customers',
+                  list: '/customers',
+                  show: '/customers/show/:id',
+                  edit: '/customers/edit/:id',
+                  meta: {
+                    label: 'Customers',
+                    icon: <TeamOutlined />,
+                  },
                 },
-              },
-              {
-                name: 'Customers', // Updated to match backend naming
-                list: '/customers',
-                show: '/customers/show/:id',
-                edit: '/customers/edit/:id',
-                meta: {
-                  label: 'Customer Management',
-                  icon: <span>👥</span>,
+                {
+                  name: 'trips',
+                  list: '/trips',
+                  show: '/trips/show/:id',
+                  edit: '/trips/edit/:id',
+                  meta: {
+                    label: 'Trips',
+                    icon: <EnvironmentOutlined />,
+                  },
                 },
-              },
-              {
-                name: 'Subscriptions', // Updated to match backend naming
-                list: '/subscriptions',
-                show: '/subscriptions/show/:id',
-                meta: {
-                  label: 'Subscriptions',
-                  icon: <span>💳</span>,
+                {
+                  name: 'vehicles',
+                  list: '/vehicles',
+                  show: '/vehicles/show/:id',
+                  edit: '/vehicles/edit/:id',
+                  meta: {
+                    label: 'Vehicles',
+                    icon: <CarFilled />,
+                  },
                 },
-              },
-              {
-                name: 'Payments', // Updated to match backend naming
-                list: '/payments',
-                show: '/payments/show/:id',
-                meta: {
-                  label: 'Financial Management',
-                  icon: <span>💰</span>,
+                {
+                  name: 'payments',
+                  list: '/payments',
+                  show: '/payments/show/:id',
+                  meta: {
+                    label: 'Payments',
+                    icon: <CreditCardOutlined />,
+                  },
                 },
-              },
-              {
-                name: 'Vehicles', // Updated to match backend naming
-                list: '/vehicles',
-                show: '/vehicles/show/:id',
-                edit: '/vehicles/edit/:id',
-                meta: {
-                  label: 'Vehicle Management',
-                  icon: <span>🚙</span>,
+                {
+                  name: 'subscriptions',
+                  list: '/subscriptions',
+                  show: '/subscriptions/show/:id',
+                  meta: {
+                    label: 'Subscriptions',
+                    icon: <FileTextOutlined />,
+                  },
                 },
-              },
-            ]}
-          >
-            <Routes>
-              <Route
-                element={
-                  <ThemedLayoutV2>
-                    <Outlet />
-                  </ThemedLayoutV2>
-                }
-              >
-                <Route index element={<DashboardPage />} />
-
-                {/* Trip routes */}
-                <Route path='/trips'>
-                  <Route index element={<TripList />} />
-                  <Route path='show/:id' element={<TripShow />} />
-                  <Route path='edit/:id' element={<TripEdit />} />
+              ]}
+            >
+              <Routes>
+                {/* Public authentication routes */}
+                <Route
+                  element={
+                    <Authenticated key='auth-routes' fallback={<Outlet />}>
+                      <NavigateToResource resource='dashboard' />
+                    </Authenticated>
+                  }
+                >
+                  <Route path='/auth'>
+                    <Route path='login' element={<AdminLogin />} />
+                    <Route
+                      path='forgot-password'
+                      element={<AdminForgotPassword />}
+                    />
+                    <Route
+                      path='reset-password'
+                      element={<AdminResetPassword />}
+                    />
+                  </Route>
                 </Route>
 
-                {/* Driver routes */}
-                <Route path='/drivers'>
-                  <Route index element={<DriverList />} />
-                  <Route path='show/:id' element={<DriverShow />} />
-                  <Route path='edit/:id' element={<DriverEdit />} />
-                  <Route path='create' element={<DriverCreate />} />
+                {/* Protected admin routes */}
+                <Route
+                  element={
+                    <Authenticated
+                      key='authenticated-routes'
+                      redirectOnFail='/auth/login'
+                    >
+                      <ThemedLayoutV2>
+                        <Outlet />
+                      </ThemedLayoutV2>
+                    </Authenticated>
+                  }
+                >
+                  {/* Dashboard */}
+                  <Route path='/dashboard' element={<DashboardPage />} />
+
+                  {/* Driver routes */}
+                  <Route path='/drivers'>
+                    <Route index element={<DriverList />} />
+                    <Route path='show/:id' element={<DriverShow />} />
+                    <Route path='edit/:id' element={<DriverEdit />} />
+                    <Route path='create' element={<DriverCreate />} />
+                  </Route>
+
+                  {/* Customer routes */}
+                  <Route path='/customers'>
+                    <Route index element={<CustomerList />} />
+                    <Route path='show/:id' element={<CustomerShow />} />
+                    <Route path='edit/:id' element={<CustomerEdit />} />
+                  </Route>
+
+                  {/* Trip routes */}
+                  <Route path='/trips'>
+                    <Route index element={<TripList />} />
+                    <Route path='show/:id' element={<TripShow />} />
+                    <Route path='edit/:id' element={<TripEdit />} />
+                  </Route>
+
+                  {/* Vehicle routes */}
+                  <Route path='/vehicles'>
+                    <Route index element={<VehicleList />} />
+                    <Route path='show/:id' element={<VehicleShow />} />
+                    <Route path='edit/:id' element={<VehicleEdit />} />
+                  </Route>
+
+                  {/* Payment routes */}
+                  <Route path='/payments'>
+                    <Route index element={<PaymentList />} />
+                    <Route path='show/:id' element={<PaymentShow />} />
+                  </Route>
+
+                  {/* Subscription routes */}
+                  <Route path='/subscriptions'>
+                    <Route index element={<SubscriptionList />} />
+                    <Route path='show/:id' element={<SubscriptionShow />} />
+                  </Route>
+
+                  {/* Catch all routes */}
+                  <Route path='*' element={<ErrorComponent />} />
                 </Route>
 
-                {/* Customer routes */}
-                <Route path='/customers'>
-                  <Route index element={<CustomerList />} />
-                  <Route path='show/:id' element={<CustomerShow />} />
-                  <Route path='edit/:id' element={<CustomerEdit />} />
-                </Route>
+                {/* Root redirect */}
+                <Route
+                  path='/'
+                  element={
+                    <Authenticated
+                      key='root-route'
+                      fallback={<CatchAllNavigate to='/auth/login' />}
+                    >
+                      <NavigateToResource resource='dashboard' />
+                    </Authenticated>
+                  }
+                />
+              </Routes>
 
-                {/* Subscription routes */}
-                <Route path='/subscriptions'>
-                  <Route index element={<SubscriptionList />} />
-                  <Route path='show/:id' element={<SubscriptionShow />} />
-                </Route>
-
-                {/* Payment routes */}
-                <Route path='/payments'>
-                  <Route index element={<PaymentList />} />
-                  <Route path='show/:id' element={<PaymentShow />} />
-                </Route>
-
-                {/* Vehicle routes */}
-                <Route path='/vehicles'>
-                  <Route index element={<VehicleList />} />
-                  <Route path='show/:id' element={<VehicleShow />} />
-                  <Route path='edit/:id' element={<VehicleEdit />} />
-                </Route>
-
-                <Route path='*' element={<ErrorComponent />} />
-              </Route>
-            </Routes>
-          </Refine>
+              <UnsavedChangesNotifier />
+              <DocumentTitleHandler />
+            </Refine>
+          </Provider>
         </AntdApp>
       </ConfigProvider>
     </BrowserRouter>
